@@ -1026,6 +1026,223 @@ service "foo" {
 	assert.Len(resp.Nodes, 1)
 }
 
+func TestHealth_ServiceNodes_Ingress(t *testing.T) {
+	t.Parallel()
+	dir1, s1 := testServer(t)
+	defer os.RemoveAll(dir1)
+	defer s1.Shutdown()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
+
+	testrpc.WaitForLeader(t, s1.RPC, "dc1")
+
+	arg := structs.RegisterRequest{
+		Datacenter: "dc1",
+		Node:       "foo",
+		Address:    "127.0.0.1",
+		Service: &structs.NodeService{
+			ID:      "ingress-gateway",
+			Service: "ingress-gateway",
+		},
+		Check: &structs.HealthCheck{
+			Name:      "ingress connect",
+			Status:    api.HealthPassing,
+			ServiceID: "ingress-gateway",
+		},
+	}
+	var out struct{}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out))
+
+	arg = structs.RegisterRequest{
+		Datacenter: "dc1",
+		Node:       "bar",
+		Address:    "127.0.0.2",
+		Service: &structs.NodeService{
+			ID:      "ingress-gateway",
+			Service: "ingress-gateway",
+		},
+		Check: &structs.HealthCheck{
+			Name:      "ingress connect",
+			Status:    api.HealthWarning,
+			ServiceID: "ingress-gateway",
+		},
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out))
+
+	// Register ingress-gateway config entry
+	{
+		args := &structs.IngressGatewayConfigEntry{
+			Name: "ingress-gateway",
+			Kind: structs.IngressGateway,
+			Listeners: []structs.IngressListener{
+				{
+					Port: 8888,
+					Services: []structs.IngressService{
+						{Name: "db"},
+					},
+				},
+			},
+		}
+
+		req := structs.ConfigEntryRequest{
+			Op:         structs.ConfigEntryUpsert,
+			Datacenter: "dc1",
+			Entry:      args,
+		}
+		var out bool
+		require.Nil(t, msgpackrpc.CallWithCodec(codec, "ConfigEntry.Apply", &req, &out))
+		require.True(t, out)
+	}
+
+	var out2 structs.IndexedCheckServiceNodes
+	req := structs.ServiceSpecificRequest{
+		Datacenter:  "dc1",
+		ServiceName: "db",
+		Ingress:     true,
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
+
+	nodes := out2.Nodes
+	require.Len(t, nodes, 2)
+	require.Equal(t, nodes[0].Node.Node, "bar")
+	require.Equal(t, nodes[0].Checks[0].Status, api.HealthWarning)
+	require.Equal(t, nodes[1].Node.Node, "foo")
+	require.Equal(t, nodes[1].Checks[0].Status, api.HealthPassing)
+}
+
+func TestHealth_ServiceNodes_Ingress_ACL(t *testing.T) {
+	t.Parallel()
+	dir1, s1 := testServerWithConfig(t, func(c *Config) {
+		c.ACLDatacenter = "dc1"
+		c.ACLsEnabled = true
+		c.ACLMasterToken = "root"
+		c.ACLDefaultPolicy = "deny"
+		c.ACLEnforceVersion8 = false
+	})
+	defer os.RemoveAll(dir1)
+	defer s1.Shutdown()
+	codec := rpcClient(t, s1)
+	defer codec.Close()
+
+	testrpc.WaitForLeader(t, s1.RPC, "dc1")
+
+	// Create the ACL.
+	var token string
+	{
+		arg := structs.ACLRequest{
+			Datacenter: "dc1",
+			Op:         structs.ACLSet,
+			ACL: structs.ACL{
+				Name: "User token",
+				Type: structs.ACLTokenTypeClient,
+				Rules: `
+service "db" {
+	policy = "write"
+}
+`,
+			},
+			WriteRequest: structs.WriteRequest{Token: "root"},
+		}
+		require.Nil(t, msgpackrpc.CallWithCodec(codec, "ACL.Apply", &arg, &token))
+	}
+
+	arg := structs.RegisterRequest{
+		Datacenter: "dc1",
+		Node:       "foo",
+		Address:    "127.0.0.1",
+		Service: &structs.NodeService{
+			ID:      "ingress-gateway",
+			Service: "ingress-gateway",
+		},
+		Check: &structs.HealthCheck{
+			Name:      "ingress connect",
+			Status:    api.HealthPassing,
+			ServiceID: "ingress-gateway",
+		},
+		WriteRequest: structs.WriteRequest{Token: "root"},
+	}
+	var out struct{}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out))
+
+	arg = structs.RegisterRequest{
+		Datacenter: "dc1",
+		Node:       "bar",
+		Address:    "127.0.0.2",
+		Service: &structs.NodeService{
+			ID:      "ingress-gateway",
+			Service: "ingress-gateway",
+		},
+		Check: &structs.HealthCheck{
+			Name:      "ingress connect",
+			Status:    api.HealthWarning,
+			ServiceID: "ingress-gateway",
+		},
+		WriteRequest: structs.WriteRequest{Token: "root"},
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Catalog.Register", &arg, &out))
+
+	// Register ingress-gateway config entry
+	{
+		args := &structs.IngressGatewayConfigEntry{
+			Name: "ingress-gateway",
+			Kind: structs.IngressGateway,
+			Listeners: []structs.IngressListener{
+				{
+					Port:     8888,
+					Protocol: "http",
+					Services: []structs.IngressService{
+						{Name: "db"},
+						{Name: "another"},
+					},
+				},
+			},
+		}
+
+		req := structs.ConfigEntryRequest{
+			Op:           structs.ConfigEntryUpsert,
+			Datacenter:   "dc1",
+			Entry:        args,
+			WriteRequest: structs.WriteRequest{Token: "root"},
+		}
+		var out bool
+		require.Nil(t, msgpackrpc.CallWithCodec(codec, "ConfigEntry.Apply", &req, &out))
+		require.True(t, out)
+	}
+
+	var out2 structs.IndexedCheckServiceNodes
+	req := structs.ServiceSpecificRequest{
+		Datacenter:  "dc1",
+		ServiceName: "db",
+		Ingress:     true,
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
+	require.Len(t, out2.Nodes, 0)
+
+	req = structs.ServiceSpecificRequest{
+		Datacenter:   "dc1",
+		ServiceName:  "another",
+		Ingress:      true,
+		QueryOptions: structs.QueryOptions{Token: token},
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
+	require.Len(t, out2.Nodes, 0)
+
+	req = structs.ServiceSpecificRequest{
+		Datacenter:   "dc1",
+		ServiceName:  "db",
+		Ingress:      true,
+		QueryOptions: structs.QueryOptions{Token: token},
+	}
+	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
+
+	nodes := out2.Nodes
+	require.Len(t, nodes, 2)
+	require.Equal(t, nodes[0].Node.Node, "bar")
+	require.Equal(t, nodes[0].Checks[0].Status, api.HealthWarning)
+	require.Equal(t, nodes[1].Node.Node, "foo")
+	require.Equal(t, nodes[1].Checks[0].Status, api.HealthPassing)
+}
+
 func TestHealth_NodeChecks_FilterACL(t *testing.T) {
 	t.Parallel()
 	dir, token, srv, codec := testACLFilterServer(t)
