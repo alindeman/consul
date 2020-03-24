@@ -1063,7 +1063,7 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 		snap.IngressGateway.ServiceLists = serviceLists
 
 		// Update our discovery chain watches.
-		if err := s.resetIngressDiscoveryWatches(snap); err != nil {
+		if err := s.resetIngressUpstreamsAndDiscoveryWatches(snap); err != nil {
 			return err
 		}
 
@@ -1081,7 +1081,7 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 		snap.IngressGateway.Config = ingressGateway
 
 		// Update our discovery chain watches.
-		if err := s.resetIngressDiscoveryWatches(snap); err != nil {
+		if err := s.resetIngressUpstreamsAndDiscoveryWatches(snap); err != nil {
 			return err
 		}
 
@@ -1108,9 +1108,9 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 			return fmt.Errorf("invalid correlation id %q", u.CorrelationID)
 		}
 
-		m, ok := snap.IngressGateway.WatchedUpstreamEndpoints[svc]
+		_, ok = snap.IngressGateway.WatchedUpstreamEndpoints[svc]
 		if !ok {
-			m = make(map[string]structs.CheckServiceNodes)
+			m := make(map[string]structs.CheckServiceNodes)
 			snap.IngressGateway.WatchedUpstreamEndpoints[svc] = m
 		}
 		snap.IngressGateway.WatchedUpstreamEndpoints[svc][targetID] = resp.Nodes
@@ -1122,40 +1122,36 @@ func (s *state) handleUpdateIngressGateway(u cache.UpdateEvent, snap *ConfigSnap
 	return nil
 }
 
-type serviceInfo struct {
-	Namespace string
-	Port      int
-}
-
-func (s *state) resetIngressDiscoveryWatches(snap *ConfigSnapshot) error {
+func (s *state) resetIngressUpstreamsAndDiscoveryWatches(snap *ConfigSnapshot) error {
 	// Exit early if we don't have both the gateway config and service list.
 	if snap.IngressGateway.Config == nil || snap.IngressGateway.ServiceLists == nil {
 		return nil
 	}
 
 	var upstreams []structs.Upstream
-	watchedSvcs := make(map[string]struct{})
 	for _, listener := range snap.IngressGateway.Config.Listeners {
 		for _, svc := range listener.Services {
 			ns := svc.NamespaceOrDefault()
 			if svc.Name == structs.WildcardSpecifier {
-				for service, _ := range snap.IngressGateway.ServiceLists[ns] {
-					u, err := s.watchIngressDiscoveryChain(snap, service.ID, ns, listener.Port)
-					if err != nil {
-						return err
-					}
+				for service := range snap.IngressGateway.ServiceLists[ns] {
+					u := upstreamForIngress(snap.Address, ns, service.ID, listener.Port)
 					upstreams = append(upstreams, u)
-					watchedSvcs[u.Identifier()] = struct{}{}
 				}
 			} else {
-				u, err := s.watchIngressDiscoveryChain(snap, svc.Name, ns, listener.Port)
-				if err != nil {
-					return err
-				}
+				u := upstreamForIngress(snap.Address, ns, svc.Name, listener.Port)
 				upstreams = append(upstreams, u)
-				watchedSvcs[u.Identifier()] = struct{}{}
 			}
 		}
+	}
+	snap.IngressGateway.Upstreams = upstreams
+
+	watchedSvcs := make(map[string]struct{})
+	for _, u := range upstreams {
+		err := s.watchIngressDiscoveryChain(snap, u)
+		if err != nil {
+			return err
+		}
+		watchedSvcs[u.Identifier()] = struct{}{}
 	}
 
 	for id, cancelFn := range snap.IngressGateway.WatchedDiscoveryChains {
@@ -1165,46 +1161,44 @@ func (s *state) resetIngressDiscoveryWatches(snap *ConfigSnapshot) error {
 		}
 	}
 
-	snap.IngressGateway.Upstreams = upstreams
 
 	return nil
 }
 
-func (s *state) watchIngressDiscoveryChain(snap *ConfigSnapshot, service, namespace string, port int) (structs.Upstream, error) {
-	addr := snap.Address
-	if addr == "" {
-		addr = "0.0.0.0"
+func upstreamForIngress(address, namespace, service string, port int) structs.Upstream {
+	if address == "" {
+		address = "0.0.0.0"
 	}
-
-	u := structs.Upstream{
+	return structs.Upstream{
 		DestinationName:      service,
 		DestinationNamespace: namespace,
-		LocalBindAddress:     addr,
+		LocalBindAddress:     address,
 		LocalBindPort:        port,
-		//Config:               map[string]interface{}{"protocol": listener.Protocol},
 	}
+}
 
+func (s *state) watchIngressDiscoveryChain(snap *ConfigSnapshot, u structs.Upstream) error {
 	if _, ok := snap.IngressGateway.WatchedDiscoveryChains[u.Identifier()]; ok {
-		return u, nil
+		return nil
 	}
 
 	ctx, cancel := context.WithCancel(s.ctx)
 	err := s.cache.Notify(ctx, cachetype.CompiledDiscoveryChainName, &structs.DiscoveryChainRequest{
 		Datacenter:           s.source.Datacenter,
 		QueryOptions:         structs.QueryOptions{Token: s.token},
-		Name:                 service,
+		Name:                 u.DestinationName,
 		EvaluateInDatacenter: s.source.Datacenter,
-		EvaluateInNamespace:  namespace,
+		EvaluateInNamespace:  u.DestinationNamespace,
 		// OverrideMeshGateway:    s.proxyCfg.MeshGateway.OverlayWith(u.MeshGateway),
 		// OverrideConnectTimeout: cfg.ConnectTimeout(),
 	}, "discovery-chain:"+u.Identifier(), s.ch)
 	if err != nil {
 		cancel()
-		return u, err
+		return err
 	}
 
 	snap.IngressGateway.WatchedDiscoveryChains[u.Identifier()] = cancel
-	return u, nil
+	return nil
 }
 
 func (s *state) resetIngressWatchesFromChain(
