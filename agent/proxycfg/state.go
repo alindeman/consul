@@ -1222,8 +1222,6 @@ func (s *state) resetIngressWatchesFromChain(
 	// We could invalidate this selectively based on a hash of the relevant
 	// resolver information, but for now just reset anything about this
 	// upstream when the chain changes in any way.
-	//
-	// TODO(rb): content hash based add/remove
 	for targetID, cancelFn := range snap.IngressGateway.WatchedUpstreams[id] {
 		s.logger.Trace("stopping watch of target",
 			"upstream", id,
