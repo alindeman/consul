@@ -107,12 +107,30 @@ func (c *configSnapshotMeshGateway) IsEmpty() bool {
 }
 
 type configSnapshotIngressGateway struct {
-	Config                   *structs.IngressGatewayConfigEntry
-	ServiceLists             map[string]map[structs.ServiceID]struct{}
-	Upstreams                []structs.Upstream
-	WatchedDiscoveryChains   map[string]context.CancelFunc
-	DiscoveryChain           map[string]*structs.CompiledDiscoveryChain
-	WatchedUpstreams         map[string]map[string]context.CancelFunc
+	// Config is the associated ingress-gateway config entry that we are generating watches for.
+	Config *structs.IngressGatewayConfigEntry
+	// ServiceLists is a map of maps, the first key being a namespace and the
+	// second being the service ID. This is used to separate out all services by
+	// namespace in order to deal with "*" wildcard specifiers.
+	ServiceLists map[string]map[structs.ServiceID]struct{}
+	// Upstreams is a list of upstreams this ingress gateway should serve traffic to. This is
+	// constructed from the ingress-gateway config entry, Config, and the
+	// ServiceLists fields.
+	Upstreams []structs.Upstream
+	// WatchedDiscoveryChains is a map of upstream.Identifier() -> CancelFunc's
+	// in order to cancel any watches when the ingress gateway configuration is
+	// changed.
+	WatchedDiscoveryChains map[string]context.CancelFunc
+	// DiscoveryChain is a map of upstream.Identifier() ->
+	// CompiledDiscoveryChain's, and is used to determine what services could be
+	// targeted by this upstream. We then instantiate watches for those targets.
+	DiscoveryChain map[string]*structs.CompiledDiscoveryChain
+	// WatchedUpstreams is a map of upstream.Identifier() -> (map of TargetID -> CancelFunc's)
+	// in order to cancel any watches when the ingress gateway configuration is
+	// changed.
+	WatchedUpstreams map[string]map[string]context.CancelFunc
+	// WatchedUpstreamEndpoints is a map of upstream.Identifier() -> (map of TargetID -> CheckServiceNodes)
+	// and is used to determine the backing endpoints of an upstream.
 	WatchedUpstreamEndpoints map[string]map[string]structs.CheckServiceNodes
 }
 
