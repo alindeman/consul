@@ -1161,7 +1161,6 @@ func (s *state) resetIngressUpstreamsAndDiscoveryWatches(snap *ConfigSnapshot) e
 		}
 	}
 
-
 	return nil
 }
 
