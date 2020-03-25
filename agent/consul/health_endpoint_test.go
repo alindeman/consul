@@ -1117,7 +1117,7 @@ func TestHealth_ServiceNodes_Ingress_ACL(t *testing.T) {
 		c.ACLsEnabled = true
 		c.ACLMasterToken = "root"
 		c.ACLDefaultPolicy = "deny"
-		c.ACLEnforceVersion8 = false
+		c.ACLEnforceVersion8 = true
 	})
 	defer os.RemoveAll(dir1)
 	defer s1.Shutdown()
@@ -1127,24 +1127,11 @@ func TestHealth_ServiceNodes_Ingress_ACL(t *testing.T) {
 	testrpc.WaitForLeader(t, s1.RPC, "dc1")
 
 	// Create the ACL.
-	var token string
-	{
-		arg := structs.ACLRequest{
-			Datacenter: "dc1",
-			Op:         structs.ACLSet,
-			ACL: structs.ACL{
-				Name: "User token",
-				Type: structs.ACLTokenTypeClient,
-				Rules: `
-service "db" {
-	policy = "write"
-}
-`,
-			},
-			WriteRequest: structs.WriteRequest{Token: "root"},
-		}
-		require.Nil(t, msgpackrpc.CallWithCodec(codec, "ACL.Apply", &arg, &token))
-	}
+	token, err := upsertTestTokenWithPolicyRules(codec, "root", "dc1", `
+  service "db" { policy = "read" }
+	service "ingress-gateway" { policy = "read" }
+	node_prefix "" { policy = "read" }`)
+	require.NoError(t, err)
 
 	arg := structs.RegisterRequest{
 		Datacenter: "dc1",
@@ -1209,6 +1196,7 @@ service "db" {
 		require.True(t, out)
 	}
 
+	// No token used
 	var out2 structs.IndexedCheckServiceNodes
 	req := structs.ServiceSpecificRequest{
 		Datacenter:  "dc1",
@@ -1218,20 +1206,22 @@ service "db" {
 	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
 	require.Len(t, out2.Nodes, 0)
 
+	// Requesting a service that is not covered by the token's policy
 	req = structs.ServiceSpecificRequest{
 		Datacenter:   "dc1",
 		ServiceName:  "another",
 		Ingress:      true,
-		QueryOptions: structs.QueryOptions{Token: token},
+		QueryOptions: structs.QueryOptions{Token: token.SecretID},
 	}
 	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
 	require.Len(t, out2.Nodes, 0)
 
+	// Requesting service covered by the token's policy
 	req = structs.ServiceSpecificRequest{
 		Datacenter:   "dc1",
 		ServiceName:  "db",
 		Ingress:      true,
-		QueryOptions: structs.QueryOptions{Token: token},
+		QueryOptions: structs.QueryOptions{Token: token.SecretID},
 	}
 	require.Nil(t, msgpackrpc.CallWithCodec(codec, "Health.ServiceNodes", &req, &out2))
 
