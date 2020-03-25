@@ -263,6 +263,16 @@ func TestListenersFromSnapshot(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:   "ingress-gateway",
+			create: proxycfg.TestConfigSnapshotIngressGateway,
+			setup:  nil,
+		},
+		{
+			name:   "ingress-gateway-no-services",
+			create: proxycfg.TestConfigSnapshotIngressGatewayNoServices,
+			setup:  nil,
+		},
 	}
 
 	for _, tt := range tests {

@@ -1070,6 +1070,14 @@ func testConfigSnapshotIngressGateway(t testing.T, populateServices bool) *Confi
 					"db.default.dc1": TestUpstreamNodes(t),
 				},
 			},
+			Upstreams: structs.Upstreams{
+				{
+					// We rely on this one having default type in a few tests...
+					DestinationName:  "db",
+					LocalBindPort:    9191,
+					LocalBindAddress: "2.3.4.5",
+				},
+			},
 		}
 	}
 	return snap
